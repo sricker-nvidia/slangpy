@@ -469,8 +469,7 @@ nb::object NativeCallData::exec(
     }
 
     // Calculate the group strides
-    std::vector<int> call_group_strides;
-    call_group_strides.reserve(cs.size());
+    short_vector<int, 32> call_group_strides;
     current_stride = 1;
     for (auto it = call_group_shape.rbegin(); it != call_group_shape.rend(); ++it) {
         call_group_strides.push_back(current_stride);
@@ -488,10 +487,8 @@ nb::object NativeCallData::exec(
     //       which would likely defeat the purpose of using call groups for better
     //       memory coherency and uses of shared memory.
     int total_threads = 1;
-    std::vector<int> call_grid_shape;
-    std::vector<int> aligned_call_shape;
-    call_grid_shape.reserve(cs.size());
-    aligned_call_shape.reserve(cs.size());
+    short_vector<int, 32> call_grid_shape;
+    short_vector<int, 32> aligned_call_shape;
     bool is_call_shape_unaligned = false;
     for (int i = 0; i < cs.size(); i++) {
         // When the call shape is not call group shape aligned, we will add some
@@ -504,10 +501,9 @@ nb::object NativeCallData::exec(
     }
 
     // Calculate the grid strides
-    std::vector<int> call_grid_strides;
-    call_grid_strides.reserve(cs.size());
+    short_vector<int, 32> call_grid_strides;
     current_stride = 1;
-    for (auto it = call_grid_shape.rbegin(); it != call_grid_shape.rend(); ++it) {
+    for (auto it = call_grid_shape.end() - 1; it >= call_grid_shape.begin(); --it) {
         call_grid_strides.push_back(current_stride);
         current_stride *= *it;
     }
@@ -527,16 +523,12 @@ nb::object NativeCallData::exec(
         if (call_data_cursor.is_reference())
             call_data_cursor = call_data_cursor.dereference();
 
-        if (!call_grid_strides.empty()) {
+        if (!cs.empty()) {
             call_data_cursor["_call_dim"]._set_array_unsafe(&cs[0], cs.size() * 4, cs.size());
             call_data_cursor["_grid_stride"]
                 ._set_array_unsafe(&call_grid_strides[0], call_grid_strides.size() * 4, call_grid_strides.size());
             call_data_cursor["_grid_dim"]
                 ._set_array_unsafe(&call_grid_shape[0], call_grid_shape.size() * 4, call_grid_shape.size());
-            call_data_cursor["_group_stride"]
-                ._set_array_unsafe(&call_group_strides[0], call_group_strides.size() * 4, call_group_strides.size());
-            call_data_cursor["_group_dim"]
-                ._set_array_unsafe(&call_group_shape[0], call_group_shape.size() * 4, call_group_shape.size());
         }
 
         call_data_cursor["_thread_count"] = uint3(total_threads, 1, 1);
@@ -1209,6 +1201,7 @@ SGL_PY_EXPORT(utils_slangpy)
             "call_group_shape",
             &NativeCallData::get_call_group_shape,
             &NativeCallData::set_call_group_shape,
+            nb::arg().none(),
             D_NA(NativeCallData, call_group_shape)
         )
         .def("log", &NativeCallData::log, "level"_a, "msg"_a, "frequency"_a = LogFrequency::always, D(Logger, log))
