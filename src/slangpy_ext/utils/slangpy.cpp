@@ -414,7 +414,7 @@ nb::object NativeCallData::exec(
         // call_group_shape.size() > 0.
         if (call_group_shape.size() > cs.size()) {
             throw std::runtime_error(fmt::format(
-                "call_group_shape dimension ({}) must be <= call_shape dimension ({}). "
+                "call_group_shape dimensionality ({}) must be <= call_shape dimensionality ({}). "
                 "call_group_shape cannot have more dimensions than call_shape.",
                 call_group_shape.size(),
                 cs.size()
@@ -426,7 +426,7 @@ nb::object NativeCallData::exec(
             // log a debug message, giving users a chance to correct their calls.
             if (is_log_enabled(LogLevel::debug)) {
                 log_debug(
-                    "call_group_shape dimension ({}) < call_shape dimension ({}). "
+                    "call_group_shape dimensionality ({}) < call_shape dimensionality ({}). "
                     "Padding call_group_shape with {} leading 1's. "
                     "Consider specifying full dimensions for better performance.",
                     call_group_shape.size(),

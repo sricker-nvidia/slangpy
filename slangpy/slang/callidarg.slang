@@ -3,6 +3,8 @@ implementing slangpy;
 
 public struct CallIdArg {
 
+    int dummy;
+
     // Array load
     public void load<let N : int, T: __BuiltinIntegerType>(ContextND<N> context, out Array<T, N> value) {
         var t = context.call_id;
@@ -59,14 +61,3 @@ extension<T : __BuiltinIntegerType> VectorizeCallidArgTo<T, -1> {
 extension<T : __BuiltinIntegerType> VectorizeCallidArgTo<T, 1> {
     typealias VectorType = T;
 }
-
-// Functions provided for use in user's shaders
-// Note: In the returned arrays, the first component represents the dimension with the highest stride,
-// the second component the dimension with the next highest stride, and so on. This aligns with
-// behavior described at https://slangpy.shader-slang.org/en/latest/src/generators/generator_ids.html
-// but could be confusing to a user using these and expecting [x, y, z, ...] formatting common
-// with graphics.
-
-extern public int[N] get_call_id<let N: int>();
-extern public int[N] get_call_group_id<let N: int>();
-extern public int[N] get_call_group_thread_id<let N: int>();
