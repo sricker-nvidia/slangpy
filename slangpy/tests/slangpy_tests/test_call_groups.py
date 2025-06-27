@@ -12,67 +12,88 @@ This module tests:
 import numpy as np
 import pytest
 import slangpy as spy
+import math
 from slangpy import DeviceType
 from slangpy.slangpy import Shape
 from slangpy.types.buffer import NDBuffer
 from . import helpers
 
 
-# Test data for different dimensions and call group configurations
-CALL_GROUP_TEST_CASES = [
-    # (dimension, call_shape, call_group_shape, description)
-    (1, (8,), (2,), "1D basic aligned"),
-    (1, (9,), (2,), "1D misaligned"),
-    (1, (1,), (4,), "1D smaller than group"),
-    (2, (8, 6), (2, 3), "2D basic aligned"),
-    (2, (9, 7), (2, 3), "2D misaligned"),
-    (2, (1, 1), (4, 4), "2D smaller than group"),
-    (3, (8, 6, 4), (2, 3, 2), "3D basic aligned"),
-    (3, (9, 7, 5), (2, 3, 2), "3D misaligned"),
-    (4, (8, 6, 4, 4), (2, 3, 2, 2), "4D basic aligned"),
-    (4, (9, 7, 5, 3), (2, 3, 2, 2), "4D misaligned"),
-    (5, (8, 6, 4, 4, 2), (2, 3, 2, 2, 2), "5D basic aligned"),
-    (5, (9, 7, 5, 3, 3), (2, 3, 2, 2, 2), "5D misaligned"),
+# Test data for different call group shapes.
+# Includes some common cases and edge cases that are
+# all expected to work.
+VALID_CALL_GROUP_SHAPE_TEST_CASES = [
+    # (call_shape, call_group_shape, description)
+    ((8,), (2,), "1D basic aligned"),
+    ((9,), (2,), "1D misaligned"),
+    ((1,), (4,), "1D smaller than group"),
+    ((8, 6), (2, 3), "2D basic aligned"),
+    ((9, 7), (2, 3), "2D misaligned"),
+    ((1, 1), (4, 4), "2D smaller than group"),
+    ((8, 6, 4), (2, 3, 2), "3D basic aligned"),
+    ((9, 7, 5), (2, 3, 2), "3D misaligned"),
+    ((8, 6, 4, 4), (2, 3, 2, 2), "4D basic aligned"),
+    ((9, 7, 5, 3), (2, 3, 2, 2), "4D misaligned"),
+    ((8, 6, 4, 4, 2), (2, 3, 2, 2, 2), "5D basic aligned"),
+    ((9, 7, 5, 3, 3), (2, 3, 2, 2, 2), "5D misaligned"),
+    ((32,), (1,), "1D linear dispatch (group size 1)"),
+    ((32, 32), (32, 1), "2D linear first dimension"),
+    ((32, 32), (1, 32), "2D linear second dimension"),
+    ((100, 4, 2), (32, 2, 2), "3D with varying dimensions"),
+    ((3, 5), (10, 10), "2D call smaller than group in all dims"),
+    ((8, 4, 12), (4, 8, 6), "3D call smaller in some dims"),
+    ((4, 4), (), "Empty shape should be valid - gets padded to [1, 1]"),
+    (
+        (4, 4),
+        (4),
+        "Call group shape with smaller dimensionality than call shape should be valid. Group shape gets padded.",
+    ),
 ]
 
-EDGE_CASE_TEST_CASES = [
-    # (dimension, call_shape, call_group_shape, description)
-    (1, (32,), (1,), "1D linear dispatch (group size 1)"),
-    (2, (32, 32), (32, 1), "2D linear first dimension"),
-    (2, (32, 32), (1, 32), "2D linear second dimension"),
-    (3, (100, 4, 2), (32, 2, 2), "3D with varying dimensions"),
-    (2, (3, 5), (10, 10), "2D call smaller than group in all dims"),
-    (3, (8, 4, 12), (4, 8, 6), "3D call smaller in some dims"),
+# Test data for call group shapes that are expected to
+# fail with an error message.
+INVALID_CALL_GROUP_SHAPE_TEST_CASES = [
+    # (test_name, call_shape, call_group_shape, expected_error_fragments, description)
+    (
+        "zero_value",
+        (4, 4),
+        (2, 0),
+        ["call_group_shape[1] = 0", "must be >= 1"],
+        "Zero in call_group_shape should fail",
+    ),
+    (
+        "negative_value",
+        (4, 4),
+        (2, -1),
+        ["call_group_shape[1] = -1", "must be >= 1"],
+        "Negative in call_group_shape should fail",
+    ),
+    (
+        "mixed_invalid",
+        (4, 4),
+        (0, -1),
+        ["call_group_shape[0] = 0", "must be >= 1"],
+        "Mixed invalid values - first invalid caught",
+    ),
+    (
+        "too_many_dims_2d",
+        (4, 4),
+        (2, 2, 2),
+        [
+            "call_group_shape dimensionality (3)",
+            "call_shape dimensionality (2)",
+            "cannot have more dimensions than call_shape",
+        ],
+        "3D call_group_shape for 2D call_shape should fail",
+    ),
+    (
+        "too_many_dims_1d",
+        (8,),
+        (1, 1, 1, 1, 1),
+        ["call_group_shape dimensionality (5)", "call_shape dimensionality (1)"],
+        "5D call_group_shape for 1D call_shape should fail",
+    ),
 ]
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_functions_exist(device_type: DeviceType):
-    """Test that all call group functions can be called without error."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source = """
-import "slangpy";
-
-float test_functions_exist(uint2 grid_cell) {
-    // Test global getter functions with explicit types
-    int[2] call_id_result = get_call_id<2>();
-    int[2] call_group_id_result = get_call_group_id<2>();
-    int[2] call_group_thread_id_result = get_call_group_thread_id<2>();
-
-    // Return success - we just want to verify compilation works
-    return 1.0f;
-}
-"""
-
-    module = helpers.create_module(device, kernel_source)
-
-    # Test that the function can be called without error
-    result = module.test_functions_exist(spy.grid((4, 6)), _result="numpy")
-
-    # Verify all results are 1.0 (success)
-    assert np.all(result == 1.0)
 
 
 @pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
@@ -85,11 +106,11 @@ def test_1d_call_groups_with_validation(device_type: DeviceType):
 import "slangpy";
 
 uint test_1d_groups(uint grid_cell) {
-    int[1] call_group_id = get_call_group_id<1>();
-    int[1] call_group_thread_id = get_call_group_thread_id<1>();
+    CallShapeInfo call_group_id = CallShapeInfo::get_call_group_id();
+    CallShapeInfo call_group_thread_id = CallShapeInfo::get_call_group_thread_id();
 
     // Return packed result: high 16 bits = group_id, low 16 bits = thread_id
-    return (call_group_id[0] << 16) | call_group_thread_id[0];
+    return (call_group_id.shape[0] << 16) | call_group_thread_id.shape[0];
 }
 """
 
@@ -147,17 +168,17 @@ def test_call_group_math_2d_validation(device_type: DeviceType):
 import "slangpy";
 
 uint test_call_group_math_2d(uint2 grid_cell) {
-    int[2] call_id = get_call_id<2>();
-    int[2] call_group_id = get_call_group_id<2>();
-    int[2] call_group_thread_id = get_call_group_thread_id<2>();
+    CallShapeInfo call_id = CallShapeInfo::get_call_id();
+    CallShapeInfo call_group_id = CallShapeInfo::get_call_group_id();
+    CallShapeInfo call_group_thread_id = CallShapeInfo::get_call_group_thread_id();
 
     // Pack the results:
     // Bits 24-31: call_group_id[0] (Y)
     // Bits 16-23: call_group_id[1] (X)
     // Bits 8-15: call_group_thread_id[0] (Y)
     // Bits 0-7: call_group_thread_id[1] (X)
-    return (call_group_id[0] << 24) | (call_group_id[1] << 16) |
-           (call_group_thread_id[0] << 8) | call_group_thread_id[1];
+    return (call_group_id.shape[0] << 24) | (call_group_id.shape[1] << 16) |
+           (call_group_thread_id.shape[0] << 8) | call_group_thread_id.shape[1];
 }
 """
 
@@ -183,8 +204,6 @@ uint test_call_group_math_2d(uint2 grid_cell) {
         call_group_thread_id_x = result & 0xFF
 
         # Calculate expected grid dimensions (aligned up to group boundaries)
-        import math
-
         grid_shape_y = math.ceil(call_shape[0] / group_shape[0])
         grid_shape_x = math.ceil(call_shape[1] / group_shape[1])
 
@@ -254,13 +273,13 @@ import "slangpy";
 
 uint test_5d_basic(uint[5] grid_cell) {
     // Get call group values
-    int[5] call_id = get_call_id<5>();
-    int[5] call_group_id = get_call_group_id<5>();
-    int[5] call_group_thread_id = get_call_group_thread_id<5>();
+    CallShapeInfo call_id = CallShapeInfo::get_call_id();
+    CallShapeInfo call_group_id = CallShapeInfo::get_call_group_id();
+    CallShapeInfo call_group_thread_id = CallShapeInfo::get_call_group_thread_id();
 
     // Pack some of the results to validate they're not all zeros
     // Pack dimensions 2, 3, 4 (which have non-trivial group shapes)
-    return (call_group_id[2] << 16) | (call_group_thread_id[3] << 8) | call_group_thread_id[4];
+    return (call_group_id.shape[2] << 16) | (call_group_thread_id.shape[3] << 8) | call_group_thread_id.shape[4];
 }
 """
 
@@ -288,9 +307,7 @@ uint test_5d_basic(uint[5] grid_cell) {
     call_group_thread_id_4 = results & 0xFF
 
     # Basic bounds checking
-    import math
-
-    expected_grid_2 = math.ceil(call_shape[2] / call_group_shape[2])  # ceil(2/2) = 1
+    expected_grid_2 = call_shape[2] // call_group_shape[2]
     assert np.all(call_group_id_2 < expected_grid_2), "call_group_id[2] out of bounds"
     assert np.all(
         call_group_thread_id_3 < call_group_shape[3]
@@ -311,12 +328,12 @@ import "slangpy";
 
 uint test_edge_case_basic(uint2 grid_cell) {
     // Get call group functionality and pack results
-    int[2] call_group_id = get_call_group_id<2>();
-    int[2] call_group_thread_id = get_call_group_thread_id<2>();
+    CallShapeInfo call_group_id = CallShapeInfo::get_call_group_id();
+    CallShapeInfo call_group_thread_id = CallShapeInfo::get_call_group_thread_id();
 
     // Pack results to validate they're meaningful
-    return (call_group_id[0] << 24) | (call_group_id[1] << 16) |
-           (call_group_thread_id[0] << 8) | call_group_thread_id[1];
+    return (call_group_id.shape[0] << 24) | (call_group_id.shape[1] << 16) |
+           (call_group_thread_id.shape[0] << 8) | call_group_thread_id.shape[1];
 }
 """
 
@@ -370,35 +387,41 @@ uint test_edge_case_basic(uint2 grid_cell) {
 
 
 @pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-@pytest.mark.parametrize("dimension,call_shape,call_group_shape,description", CALL_GROUP_TEST_CASES)
-def test_call_group_dimensions(
+@pytest.mark.parametrize(
+    "call_shape,call_group_shape,description", VALID_CALL_GROUP_SHAPE_TEST_CASES
+)
+def test_call_group_shape_valid(
     device_type: DeviceType,
-    dimension: int,
     call_shape: tuple,
     call_group_shape: tuple,
     description: str,
 ):
-    """Test call groups across different dimensions and configurations."""
+    """Test different valid call group shapes and validate things pass."""
 
     device = helpers.get_device(device_type)
 
+    # Infer dimension from call_shape
+    dimensionality = len(call_shape)
+
     # Create a simpler test that just validates the math works
     # For 5D+, use array types like uint[5], uint[6], etc.
-    if dimension <= 4:
-        param_type = {1: "uint", 2: "uint2", 3: "uint3", 4: "uint4"}[dimension]
+    if dimensionality <= 4:
+        param_type = {1: "uint", 2: "uint2", 3: "uint3", 4: "uint4"}[dimensionality]
     else:
-        param_type = f"uint[{dimension}]"
+        param_type = f"uint[{dimensionality}]"
     kernel_source = f"""
 import "slangpy";
 
-float test_call_group_math({param_type} grid_pos) {{
+int test_call_group_math({param_type} grid_pos) {{
     // Just test that the functions can be called without error
-    int[{dimension}] call_id = get_call_id<{dimension}>();
-    int[{dimension}] call_group_id = get_call_group_id<{dimension}>();
-    int[{dimension}] call_group_thread_id = get_call_group_thread_id<{dimension}>();
+    CallShapeInfo call_id = CallShapeInfo::get_call_id();
+    CallShapeInfo call_group_id = CallShapeInfo::get_call_group_id();
+    CallShapeInfo call_group_thread_id = CallShapeInfo::get_call_group_thread_id();
 
     // Return a simple validation that functions executed
-    return 1.0f;
+    return (call_id.dimensionality == {dimensionality}) &&
+           (call_group_id.dimensionality == {dimensionality}) &&
+           (call_group_thread_id.dimensionality == {dimensionality});
 }}
 """
 
@@ -415,216 +438,60 @@ float test_call_group_math({param_type} grid_pos) {{
     # Validate that all calls completed successfully (all should be 1.0)
     results = result_buffer.to_numpy()
     assert np.all(
-        results == 1.0
+        results == 1
     ), f"Failed for {description}: {call_shape} with groups {call_group_shape}"
 
 
 @pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-@pytest.mark.parametrize("dimension,call_shape,call_group_shape,description", EDGE_CASE_TEST_CASES)
-def test_call_group_edge_cases(
+@pytest.mark.parametrize(
+    "test_name,call_shape,call_group_shape,expected_error_fragments,description",
+    INVALID_CALL_GROUP_SHAPE_TEST_CASES,
+)
+def test_call_group_error_invalid(
     device_type: DeviceType,
-    dimension: int,
+    test_name: str,
     call_shape: tuple,
     call_group_shape: tuple,
+    expected_error_fragments: list,
     description: str,
 ):
-    """Test edge cases for call group functionality."""
+    """Test different invalid call group shapes and validate expected errors."""
 
     device = helpers.get_device(device_type)
 
-    # For 5D+, use array types like uint[5], uint[6], etc.
-    if dimension <= 4:
-        param_type = {1: "uint", 2: "uint2", 3: "uint3", 4: "uint4"}[dimension]
-    else:
-        param_type = f"uint[{dimension}]"
-    kernel_source = f"""
-import "slangpy";
-
-float test_edge_case({param_type} grid_pos) {{
-    // Test that edge cases don't crash
-    int[{dimension}] call_id = get_call_id<{dimension}>();
-    int[{dimension}] call_group_id = get_call_group_id<{dimension}>();
-    int[{dimension}] call_group_thread_id = get_call_group_thread_id<{dimension}>();
-
-    return 1.0f;
-}}
-"""
-
-    module = helpers.create_module(device, kernel_source)
-
-    # Create output buffer
-    result_buffer = NDBuffer(device=device, shape=call_shape, dtype=float)
-
-    # Call with edge case call group shape
-    module.test_edge_case.call_group_shape(Shape(call_group_shape))(
-        spy.grid(call_shape), _result=result_buffer
-    )
-
-    # Validate that all calls completed successfully
-    results = result_buffer.to_numpy()
-    assert np.all(
-        results == 1.0
-    ), f"Failed edge case {description}: {call_shape} with groups {call_group_shape}"
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_error_handling(device_type: DeviceType):
-    """Test error handling for invalid call group configurations."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source = """
-import "slangpy";
-
-float test_basic(uint2 grid_pos) {
-    return 1.0f;
-}
-"""
-
-    module = helpers.create_module(device, kernel_source)
-
-    # Test invalid call group shapes
-    with pytest.raises((ValueError, RuntimeError)):
-        # Negative dimensions should fail
-        module.test_basic.call_group_shape(Shape((-1, 2)))(spy.grid((4, 4)), _result="numpy")
-
-    with pytest.raises((ValueError, RuntimeError)):
-        # Zero dimensions should fail
-        module.test_basic.call_group_shape(Shape((0, 2)))(spy.grid((4, 4)), _result="numpy")
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_dimension_validation_simple(device_type: DeviceType):
-    """Test validation of call_group_shape dimensions and values - simplified version."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source_2d = """
+    # Create appropriate kernel based on call_shape dimensions
+    if len(call_shape) == 2:
+        kernel_source = """
 import "slangpy";
 
 float test_2d(uint2 grid_pos) {
     return 1.0f;
 }
 """
-
-    module_2d = helpers.create_module(device, kernel_source_2d)
-
-    # Only test zero values first (this works in existing tests)
-    with pytest.raises((ValueError, RuntimeError)) as exc_info:
-        # Zero in call_group_shape should fail
-        module_2d.test_2d.call_group_shape(Shape((2, 0)))(spy.grid((4, 4)), _result="numpy")
-
-    error_message = str(exc_info.value)
-    # The error should be caught at Python level with clear validation message
-    assert "call_group_shape[1] = 0" in error_message and "must be >= 1" in error_message
-
-    # Test that valid configurations still work (regression test)
-    result = module_2d.test_2d.call_group_shape(Shape((2, 2)))(spy.grid((4, 4)), _result="numpy")
-    assert np.all(result == 1.0)
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_dimension_validation_too_many_dims(device_type: DeviceType):
-    """Test validation of call_group_shape having too many dimensions."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source_2d = """
-import "slangpy";
-
-float test_2d(uint2 grid_pos) {
-    return 1.0f;
-}
-"""
-
-    kernel_source_1d = """
+        module = helpers.create_module(device, kernel_source)
+        test_func = module.test_2d
+    else:  # len(call_shape) == 1
+        kernel_source = """
 import "slangpy";
 
 float test_1d(uint grid_pos) {
     return 1.0f;
 }
 """
+        module = helpers.create_module(device, kernel_source)
+        test_func = module.test_1d
 
-    module_2d = helpers.create_module(device, kernel_source_2d)
-    module_1d = helpers.create_module(device, kernel_source_1d)
-
-    # Test call_group_shape with more dimensions than call_shape
-    with pytest.raises((RuntimeError, ValueError)) as exc_info:
-        # 3D call_group_shape for 2D call_shape should fail
-        module_2d.test_2d.call_group_shape(Shape((2, 2, 2)))(spy.grid((4, 4)), _result="numpy")
+    # Test should fail with expected error
+    with pytest.raises((ValueError, RuntimeError)) as exc_info:
+        test_func.call_group_shape(Shape(call_group_shape))(spy.grid(call_shape), _result="numpy")
 
     error_message = str(exc_info.value)
-    assert "call_group_shape dimension (3)" in error_message
-    assert "call_shape dimension (2)" in error_message
-    assert "cannot have more dimensions than call_shape" in error_message
 
-    # Test with way too many dimensions
-    with pytest.raises((RuntimeError, ValueError)) as exc_info:
-        # 5D call_group_shape for 1D call_shape should fail
-        module_1d.test_1d.call_group_shape(Shape((1, 1, 1, 1, 1)))(spy.grid((8,)), _result="numpy")
-
-    error_message = str(exc_info.value)
-    assert "call_group_shape dimension (5)" in error_message
-    assert "call_shape dimension (1)" in error_message
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_dimension_validation_negative_values(device_type: DeviceType):
-    """Test validation of call_group_shape having negative values."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source_2d = """
-import "slangpy";
-
-float test_2d(uint2 grid_pos) {
-    return 1.0f;
-}
-"""
-
-    module_2d = helpers.create_module(device, kernel_source_2d)
-
-    # Test call_group_shape with negative values
-    with pytest.raises((RuntimeError, ValueError)) as exc_info:
-        # Negative in call_group_shape should fail
-        module_2d.test_2d.call_group_shape(Shape((2, -1)))(spy.grid((4, 4)), _result="numpy")
-
-    error_message = str(exc_info.value)
-    assert "call_group_shape[1] = -1" in error_message and "must be >= 1" in error_message
-
-    # Test mixed invalid values
-    with pytest.raises((RuntimeError, ValueError)) as exc_info:
-        # First invalid value should be caught
-        module_2d.test_2d.call_group_shape(Shape((0, -1)))(spy.grid((4, 4)), _result="numpy")
-
-    error_message = str(exc_info.value)
-    assert "call_group_shape[0] = 0" in error_message and "must be >= 1" in error_message
-
-
-@pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
-def test_call_group_dimension_validation_zero_dimensions(device_type: DeviceType):
-    """Test that zero-dimensional call_group_shape is valid and gets padded with 1's."""
-
-    device = helpers.get_device(device_type)
-
-    kernel_source_2d = """
-import "slangpy";
-
-float test_2d(uint2 grid_pos) {
-    return 1.0f;
-}
-"""
-
-    module_2d = helpers.create_module(device, kernel_source_2d)
-
-    # Test call_group_shape with zero dimensions Shape(())
-    # This should be VALID - it means "use default linear behavior"
-    # and should get padded to [1, 1] for a 2D call shape
-    result = module_2d.test_2d.call_group_shape(Shape(()))(spy.grid((4, 4)), _result="numpy")
-
-    # Should work and produce correct result shape
-    assert result.shape == (4, 4)
-    assert np.all(result == 1.0)
+    # Check that all expected error fragments are present
+    for fragment in expected_error_fragments:
+        assert (
+            fragment in error_message
+        ), f"Test '{test_name}': Expected '{fragment}' in error message: {error_message}"
 
 
 @pytest.mark.parametrize("device_type", helpers.DEFAULT_DEVICE_TYPES)
@@ -634,7 +501,7 @@ def test_call_group_math_verified_thread_id_patterns(device_type: DeviceType):
 
     This test validates specific thread_id values that result from call group dispatch arrangements.
     The output format is [call_id_x, call_id_y, thread_id.x] for each position [y, x].
-    Note: get_call_id<2>() returns [y, x] but we rearrange to [x, y] for clarity.
+    Note: CallShapeInfo::get_call_id().shape returns [y, x] but we rearrange to [x, y] for clarity.
 
     Two key scenarios tested:
 
@@ -657,10 +524,10 @@ def test_call_group_math_verified_thread_id_patterns(device_type: DeviceType):
 import "slangpy";
 
 // Returns call_id and thread_id for pattern validation
-// Note: get_call_id<2>() returns [y, x] order
+// Note: CallShapeInfo::get_call_id().shape returns [y, x] order
 uint3 test_thread_id_patterns(uint2 grid_cell, uint3 thread_id) {
-    int[2] call_id = get_call_id<2>();
-    return uint3(call_id[1], call_id[0], thread_id.x);  // Return as [x, y, thread_id.x]
+    CallShapeInfo call_id = CallShapeInfo::get_call_id();
+    return uint3(call_id.shape[1], call_id.shape[0], thread_id.x);  // Return as [x, y, thread_id.x]
 }
 """
 
